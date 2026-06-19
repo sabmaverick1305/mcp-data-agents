@@ -1,4 +1,35 @@
-"""Streamlit dashboard — Revenue Analytics + Agent Operations."""
+"""
+Streamlit dashboard — Revenue Analytics and Agent Operations monitoring.
+
+Two-tab Streamlit application that visualises both the underlying business data
+(from data/warehouse.db) and the agent system's operational metrics (from
+data/cost_ledger.db). Auto-refreshes warehouse data every 30 s and ledger
+data every 15 s via Streamlit's @st.cache_data(ttl=...) mechanism.
+
+Tab 1 — Revenue Analytics (warehouse.db):
+  KPI row            Total revenue, gross profit, avg margin %, best quarter
+  Quarterly chart    Grouped bar (revenue + gross profit) + margin % line on secondary axis
+  YoY comparison     Side-by-side bar: 2023 vs 2024 by quarter
+  Segment pie        Revenue share by customer segment (Enterprise / Mid-Market / SMB)
+  Regional stacked   Revenue by region per quarter (stacked bar)
+  Category bar       Horizontal bar by product category (Software / Infra / Security / Services)
+  Monthly line       Revenue trend line per month, coloured by year
+  Top-8 products     Sortable dataframe with revenue, gross profit, units sold
+
+Tab 2 — Agent Operations (cost_ledger.db):
+  KPI row            Total queries, LLM spend, cache hit rate, avg latency, avoided cost
+  Cumulative cost    Area chart of spend over time
+  Cache hit/miss     Donut chart
+  Agent routing      Bar chart — how many times each agent was invoked
+  Latency histogram  Distribution of end-to-end query latency
+  Per-agent cost     Bar (cost per agent) + grouped bar (input vs output tokens)
+  Feedback           Bar chart — good / bad / unrated counts
+  Recent queries     Dataframe of last 20 queries with time, agents, cost, cache, feedback
+
+Launch:
+  python -m streamlit run dashboard.py
+  # or via Docker Compose — bound to localhost:8501 by default
+"""
 import json
 import os
 import sqlite3

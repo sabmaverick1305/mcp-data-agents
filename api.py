@@ -1,4 +1,27 @@
-"""FastAPI layer — REST + SSE streaming for the MCP Data Agents system."""
+"""
+FastAPI application — REST and SSE streaming layer for the MCP Data Agents system.
+
+This module is the HTTP boundary of the system. It owns:
+  - Application lifecycle (startup database seed, singleton creation, graceful shutdown)
+  - All 17 API endpoints (query, ingest, cache management, cost, Redis, observability)
+  - The core query pipeline (_run_pipeline) wiring auth → security → cache → plan →
+    parallel agents → insight → synthesis → cache write → cost ledger → metrics
+  - SSE streaming variant of the pipeline (query_stream endpoint)
+  - Per-tenant RAG store cache (_rag_cache dict keyed by tenant_id)
+
+Singletons initialised at startup (stored in _state):
+  client       AsyncAnthropic or AsyncAnthropicBedrock (from bedrock_client)
+  orchestrator MCPOrchestrator — manages stdio MCP server processes
+  ledger       CostLedger — SQLite cost attribution
+  redis        RedisMemory — L1 cache + session history + rate limit + audit
+
+Auth is injected via FastAPI's Depends(require_auth) on every protected endpoint,
+which returns a TenantContext used throughout the pipeline for namespace isolation.
+
+Environment variables consumed here:
+  (all auth/redis/chroma/llm vars are delegated to their respective modules)
+  SEED_MODE    demo | real — passed to seed_database() on first run
+"""
 import asyncio
 import json
 import os

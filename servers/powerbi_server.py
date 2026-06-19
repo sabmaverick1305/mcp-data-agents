@@ -1,4 +1,37 @@
-"""MCP server simulating a Power BI semantic layer with pre-defined business metrics."""
+"""
+MCP server — Power BI semantic layer simulation (FastMCP "powerbi-semantic").
+
+Exposes a set of pre-defined business KPIs and metrics through the MCP tool protocol,
+mirroring the interface of a real Power BI XMLA / REST API connection. Backed by the
+SQLite warehouse (data/warehouse.db) rather than an actual Power BI dataset.
+
+Purpose in the system:
+  The Semantic Agent uses this server exclusively. It is designed for KPI questions
+  that can be answered from aggregated, pre-defined measures — not ad-hoc SQL.
+
+Semantic models registered:
+  sales_performance   — total_revenue, gross_margin_pct, avg_order_value,
+                        revenue_growth_mom, revenue_growth_yoy
+  customer_analytics  — customer_ltv, revenue_per_customer, unique_customers
+
+MCP tools exposed:
+  list_semantic_models()
+    → list of {id, name, description} for all registered models
+
+  get_semantic_model(model_id)
+    → full model definition including all measures and dimensions
+
+  get_metric(metric_name, time_period, dimension)
+    → computed metric value or breakdown.
+    time_period: "all" | "2023" | "2024" | "2024-Q1" | "2024-03"
+    dimension:   None | "region" | "category" | "segment"
+
+Production replacement:
+  To connect to a real Power BI tenant, replace the SQLite queries in _compute_metric()
+  with calls to the Power BI REST API (GET /datasets/{id}/executeQueries) or the XMLA
+  endpoint (DAX over HTTP). Auth: use MSAL with a service principal or managed identity.
+  The MCP tool signatures do not change — only the data access layer.
+"""
 import json
 import os
 import sqlite3

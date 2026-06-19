@@ -1,4 +1,23 @@
-"""Tests for RAGStore — cache hit, TTL, flag_bad, domain seeding."""
+"""
+Tests for rag.store.RAGStore — semantic cache, TTL enforcement, invalidation, and domain seeding.
+
+Fixture: rag(tmp_path, monkeypatch)
+  Patches rag.store.CHROMA_DIR to a temporary directory so tests use an isolated
+  in-process ChromaDB PersistentClient. Each test run gets a fresh empty store.
+  seed_domain() is called on the fixture, populating the domain_knowledge collection
+  with schema + metric documents.
+
+Test cases:
+  test_domain_seeded              seed_domain() writes > 0 documents to domain_knowledge
+  test_cache_miss_on_empty_store  retrieve() returns (None, "") on a fresh store
+  test_store_and_cache_hit        store_qa then retrieve returns the exact cached answer
+  test_near_match_cache_hit       semantically similar (not identical) question hits cache
+  test_unrelated_query_no_hit     unrelated question gets no cache hit (distance > threshold)
+  test_rag_context_returned       similar-but-not-identical question gets RAG context injected
+  test_flag_bad_removes           flag_bad() deletes entry; retrieve returns None after
+  test_ttl_expiry                 backdating cached_at beyond CACHE_TTL_HOURS causes miss
+  test_stats                      stats() reflects qa_entries and domain_docs counts correctly
+"""
 import time
 import pytest
 from unittest.mock import patch

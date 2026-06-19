@@ -1,4 +1,27 @@
-"""Tests for MCP server tools — SQL safety, schema, basic queries."""
+"""
+Integration tests for the three MCP servers — SQL safety, schema inspection, and data queries.
+
+These are true integration tests: each test spawns the actual server script as a child
+process via stdio_client and communicates through a real MCP ClientSession. The
+data/warehouse.db must exist (seeded via seed_database) for query tests to return data.
+
+Snowflake server (snowflake_server.py):
+  test_snowflake_list_tables        list_tables() returns sales_fact and product_dim
+  test_snowflake_select_query       COUNT(*) on sales_fact returns n > 0
+  test_snowflake_blocks_drop        DROP TABLE is rejected as a blocked keyword
+  test_snowflake_blocks_non_select  DELETE query rejected (must start with SELECT)
+  test_snowflake_describe_table     describe_table(sales_fact) includes revenue, gross_profit
+
+Power BI server (powerbi_server.py):
+  test_powerbi_list_models          list_semantic_models() includes sales_performance
+  test_powerbi_total_revenue_metric get_metric(total_revenue, 2024-Q1) returns a positive value
+
+Tableau server (tableau_server.py):
+  test_tableau_list_dashboards      list_dashboards() includes regional_performance
+  test_tableau_quarterly_trend      get_benchmark_data(quarterly_trend) returns ≥ 4 quarters
+
+All tests are async (pytest-asyncio) because the MCP SDK uses asyncio throughout.
+"""
 import asyncio
 import json
 import sys

@@ -1,4 +1,30 @@
-"""MCP Orchestrator — starts all MCP servers and routes tool calls with timeouts."""
+"""
+MCP Orchestrator — lifecycle manager and dispatcher for all MCP server processes.
+
+Responsibilities:
+  - Spawning the three MCP server scripts (snowflake, powerbi, tableau) as child
+    processes over stdio transport using the official MCP Python SDK.
+  - Maintaining one ClientSession per server inside a shared AsyncExitStack so all
+    sessions are torn down cleanly on application shutdown.
+  - Providing get_tools_for(server_names) — returns Anthropic-format tool definitions
+    from one or more servers for injection into agent system prompts.
+  - Routing call_tool(prefixed_name, arguments) — parses the "server__tool" prefix,
+    acquires a per-server asyncio.Lock (MCP sessions are not thread-safe), dispatches
+    the call with a configurable timeout, and returns a JSON string result.
+
+Fail-soft design:
+  If a server fails to start (import error, missing dependency, port conflict),
+  the orchestrator logs a warning and continues — the other servers remain available
+  and affected agents fall back to their error-handling paths.
+
+Tool naming convention:
+  All tools exposed to Claude use the format "{server_name}__{tool_name}"
+  (double underscore separator) so the dispatcher can route without ambiguity.
+  Example: "snowflake__run_sql_query", "powerbi__get_metric"
+
+Constants:
+  TOOL_TIMEOUT   15 seconds per individual tool call (configurable via the constant)
+"""
 import asyncio
 import json
 import os

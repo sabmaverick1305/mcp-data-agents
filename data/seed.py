@@ -1,3 +1,33 @@
+"""
+Warehouse database seeder for the MCP Data Agents system.
+
+Creates a star-schema SQLite database (data/warehouse.db) that backs all three
+MCP servers (Power BI, Tableau, Snowflake). Two seed modes are supported:
+
+  demo  (default)
+    Synthetic B2B SaaS dataset with 4 regions, 8 products, 10 customers,
+    and ~18 months of daily sales facts (Jan 2023 – Jun 2024).
+    Q1 2024 is intentionally sparse (1-4 txns/day vs 5-14 normal) to create a
+    revenue dip that agents must investigate across multiple data sources.
+
+  real
+    Loads real-world CSVs downloaded by data/download_datasets.py and mapped
+    through data/datasets.py into the warehouse schema.
+
+Star schema:
+  sales_fact          — one row per transaction (FK → all dims below)
+  region_dim          — 4 regions with annual target_revenue quotas
+  product_dim         — 8 SKUs across Software / Infrastructure / Security / Services
+  customer_dim        — 10 accounts across Enterprise / Mid-Market / SMB segments
+  date_dim            — one row per calendar day with year / quarter / month / week
+
+Usage:
+  python data/seed.py              # seeds in SEED_MODE env var mode (default: demo)
+  python data/seed.py --mode real  # loads real CSV data instead
+
+Environment:
+  SEED_MODE  demo | real   (default: demo)
+"""
 import sqlite3
 import random
 from datetime import date, timedelta

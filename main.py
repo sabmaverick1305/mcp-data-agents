@@ -1,4 +1,36 @@
-"""Conversational CLI for the MCP Data Agents system."""
+"""
+Conversational CLI — interactive terminal interface for the MCP Data Agents system.
+
+Provides a rich, streaming command-line experience with the full agent pipeline,
+chain-of-thought visibility, automatic follow-up suggestions, and in-browser
+Plotly visualization.
+
+Feature walkthrough:
+  1. Startup       Seeds the warehouse on first run, initialises RAG store, MCP servers,
+                   and Redis (with fail-open fallback to JSON history).
+  2. Query         Runs the full Planner → Semantic+Benchmark (parallel) → Insight → Synthesis
+                   pipeline. Synthesis streams token-by-token into a Rich Live panel.
+  3. Cache display Redis L1 hit → instant return with label. ChromaDB L2 hit → same.
+                   Cache miss shows how many context chunks were injected.
+  4. Follow-ups    After each non-cached answer, Claude generates 3 contextual next questions.
+                   Typing [1], [2], or [3] auto-chains to the next question without prompting.
+  5. Visualization Typing the visualize option ([4] or the last numbered choice) asks Claude
+                   to generate a SQL + chart spec, runs the SQL against warehouse.db via
+                   pandas, builds a Plotly figure, and opens it in the default browser.
+  6. Feedback      [g]ood saves to both RAG cache and Redis L1. [b]ad invalidates from both.
+                   Skip or numeric selection auto-saves without explicit feedback.
+  7. Trace panel   After every query, prints a Rich table: latency, cache hit, plan confidence,
+                   agents invoked, tool calls, token counts, estimated cost, per-agent breakdown.
+
+Slash commands:
+  /ingest <path>   Ingest a .txt or .pdf file into the default tenant RAG store
+  /docs            List all previously ingested document sources
+
+Environment:
+  ANTHROPIC_API_KEY   Required (unless USE_BEDROCK=true)
+  USE_BEDROCK         Switch to AWS Bedrock backend (true | false)
+  REDIS_URL           Optional Redis for L1 cache + session history
+"""
 import asyncio
 import json
 import os

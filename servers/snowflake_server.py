@@ -1,4 +1,39 @@
-"""MCP server simulating a Snowflake data warehouse (backed by SQLite)."""
+"""
+MCP server — Snowflake data warehouse simulation (FastMCP "snowflake-warehouse").
+
+Exposes ad-hoc SQL execution against the SQLite warehouse (data/warehouse.db) through
+the MCP tool protocol, mirroring the interface of a real Snowflake connection. The
+Insight Agent uses this server for root-cause analysis and custom rankings that cannot
+be expressed as pre-defined Power BI metrics.
+
+Security:
+  All SQL passes through _safe_query() before execution:
+    - Must start with SELECT (no DML/DDL)
+    - Blocked keyword list: DROP, DELETE, INSERT, UPDATE, CREATE, ALTER, TRUNCATE,
+      EXEC, EXECUTE, PRAGMA, ATTACH, DETACH, VACUUM, REINDEX, REPLACE, MERGE,
+      CALL, GRANT, REVOKE
+    - Maximum query length: 4000 characters
+    - Results capped at 500 rows
+  This server-side guard is in addition to the application-layer check_tool_call()
+  allowlist in security.py.
+
+Available tables (read-only):
+  sales_fact       — one row per transaction (revenue, cost, gross_profit)
+  product_dim      — product catalogue (category, unit_price, unit_cost)
+  customer_dim     — account list (segment, country)
+  region_dim       — 4 regions with annual target_revenue quotas
+  date_dim         — calendar dates with year / quarter / month / week
+
+MCP tools exposed:
+  list_tables()                  → table names in the warehouse
+  describe_table(table_name)     → column schema {name, type} for one table
+  run_sql_query(query)           → JSON array of rows (max 500)
+
+Production replacement:
+  Replace sqlite3.connect(DB_PATH) with a Snowflake connector
+  (snowflake-connector-python) or SQLAlchemy engine. The _safe_query() guard
+  and tool signatures remain unchanged.
+"""
 import json
 import os
 import re

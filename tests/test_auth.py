@@ -1,4 +1,23 @@
-"""Tests for the auth module — api_key mode, none mode, tenant allowlist."""
+"""
+Tests for auth.py — API key authentication, passthrough mode, and tenant allowlisting.
+
+Test structure:
+  TestApiKeyMode         AUTH_MODE=api_key with two valid keys (secret-key-1, secret-key-2)
+                         Tests: valid key returns TenantContext, missing key → 401,
+                         invalid key → 401, missing X-Tenant-ID header → "default" tenant.
+
+  TestNoneMode           AUTH_MODE=none (local dev passthrough)
+                         Tests: any request reaches the endpoint without an API key.
+
+  TestTenantAllowlist    AUTH_MODE=api_key with ALLOWED_TENANTS="acme,globex"
+                         Tests: allowed tenant passes, unlisted tenant → 403.
+
+Each test class uses monkeypatch + importlib.reload(auth) to re-initialise the module
+with the patched environment variables. This is necessary because auth.py reads env vars
+at import time, so reloading forces a fresh read.
+
+All tests are async (pytest-asyncio) because require_auth is an async FastAPI dependency.
+"""
 import os
 import pytest
 from unittest.mock import AsyncMock, MagicMock

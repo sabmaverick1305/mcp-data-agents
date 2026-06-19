@@ -1,4 +1,19 @@
-"""Tests for RAG document ingestion."""
+"""
+Tests for rag.ingest — document chunking, storage, retrieval, and error handling.
+
+Fixture: patch_chroma(tmp_path, monkeypatch)
+  Patches rag.ingest.CHROMA_DIR to a temporary path so tests use an isolated
+  in-memory-ish ChromaDB without touching the production data/chroma/ directory.
+  The autouse fixture applies to all tests in this module automatically.
+
+Test cases:
+  test_ingest_text_returns_chunk_count     Short text produces ≥ 1 chunk and returns count
+  test_list_sources_after_ingest           list_sources() includes the ingested source name
+  test_query_documents_finds_relevant      Semantic search returns chunks matching the topic
+  test_ingest_long_text_creates_multiple   Text > CHUNK_SIZE produces multiple chunks (> 1)
+  test_unsupported_extension_raises        ingest_file("doc.docx") raises ValueError or
+                                           FileNotFoundError before attempting to read
+"""
 import pytest
 from rag.ingest import ingest_text, query_documents, list_sources
 

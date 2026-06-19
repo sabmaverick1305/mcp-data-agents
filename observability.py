@@ -1,4 +1,41 @@
-"""Per-query observability: latency, token usage, per-agent cost breakdown, estimated cost."""
+"""
+Per-query observability — latency, token usage, per-agent cost breakdown, and pipeline tracing.
+
+Two dataclasses implement the observability contract:
+
+AgentCost
+  Tracks input/output token counts for a single agent invocation and computes the
+  estimated USD cost from the current claude-sonnet-4-6 pricing (3.00 / 15.00 per
+  million tokens for input / output). Used by QueryTrace.agent_costs dict.
+
+QueryTrace
+  The primary observability object. Created at the start of each query and accumulated
+  as the pipeline runs. Covers:
+    - Cache hit status and avoided cost estimation
+    - Agents invoked + tool calls made
+    - Total input/output tokens (accumulated across all Claude API calls)
+    - Per-agent token + cost breakdown (via merge_agent_trace)
+    - Tenant / user / team identity for cost attribution
+    - Plan confidence ("high" / "degraded" / "fallback")
+    - Latency (computed lazily as time.time() - started_at)
+
+  QueryTrace.to_dict() is serialised into the /query response JSON (the "trace" field),
+  so API consumers can see exactly what happened on every request.
+
+  QueryTrace.print_summary() renders a Rich table in the CLI for developer visibility.
+
+Usage:
+  trace = QueryTrace(question=q)
+  # ... pipeline runs ...
+  trace.record_usage(claude_response)          # accumulate tokens from any API response
+  trace.merge_agent_trace("semantic", sub)     # absorb a sub-agent's trace
+  trace.record_tool("snowflake__run_sql_query") # log tool call
+
+  # After pipeline:
+  ledger.record(trace)     # persist to SQLite
+  record_trace(trace)      # push to Prometheus
+  trace.print_summary()    # Rich table to stdout (CLI only)
+"""
 import time
 from dataclasses import dataclass, field
 

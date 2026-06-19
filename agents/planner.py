@@ -1,4 +1,37 @@
-"""Planner Agent — decomposes user questions, routes to specialized agents."""
+"""
+Planner Agent — intent classification and agent routing for the MCP Data Agents pipeline.
+
+The Planner is the first agent invoked on every query. Its job is to read the user's
+question and decide which combination of specialist agents should handle it, and what
+specific sub-task each agent should execute.
+
+Output contract (JSON):
+  {
+    "agents":         ["semantic", "benchmark", "insight"],  # subset, never empty
+    "tasks":          {"semantic": "...", "benchmark": "...", "insight": "..."},
+    "reasoning":      "one sentence explaining the routing decision",
+    "synthesis_goal": "what the final synthesised answer should accomplish"
+  }
+
+Agent semantics:
+  semantic   → Power BI pre-defined KPIs (total_revenue, gross_margin_pct, etc.)
+  benchmark  → Tableau dashboards (regional vs target, category rankings)
+  insight    → Snowflake ad-hoc SQL for root-cause / drill-down analysis
+
+Retry behaviour:
+  Up to 2 attempts. On attempt 2, the validation error from attempt 1 is fed back
+  to the model so it can self-correct. If both attempts fail, a safe fallback
+  (all three agents, original question as task) is returned so the pipeline never
+  stalls.
+
+plan_confidence values written to QueryTrace:
+  "high"      — valid JSON plan on first attempt
+  "degraded"  — valid JSON only after retry
+  "fallback"  — both attempts failed; safe fallback used
+
+Environment:
+  MODEL  hardcoded to claude-sonnet-4-6 (low latency, 512 token limit for plan output)
+"""
 import json
 
 import anthropic

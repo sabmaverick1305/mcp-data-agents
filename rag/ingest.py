@@ -1,4 +1,35 @@
-"""Ingest unstructured text documents into ChromaDB for RAG retrieval."""
+"""
+Document ingestion pipeline — chunks and stores .txt / .pdf files in ChromaDB for RAG retrieval.
+
+This module handles the /ingest REST endpoint and the /ingest CLI command. Ingested
+documents are stored in a per-tenant ChromaDB collection (documents_{tenant_id}) and
+retrieved at query time to augment agent prompts with domain-specific context.
+
+Chunking strategy:
+  CHUNK_SIZE    = 500 characters (roughly 1–2 paragraphs of business text)
+  CHUNK_OVERLAP = 80 characters (preserves sentence context across chunk boundaries)
+  Minimum chunk length: 40 chars (discards whitespace-only or trivially short chunks)
+
+Collection naming:
+  documents_{tenant_id}    e.g. documents_acme, documents_default
+  This is separate from the Q&A cache collection (qa_history_{tenant_id}) in store.py,
+  so document retrieval and answer caching are independently queryable.
+
+Supported file types:
+  .txt   — UTF-8 text, read directly
+  .pdf   — requires pypdf (pip install pypdf); pages concatenated with newlines
+
+Retrieval:
+  query_documents(question, tenant_id, n_results=4) returns chunks with cosine
+  distance < 0.55. The calling code (api.py, main.py) appends these chunks to the
+  rag_context string that is injected into the planner's system prompt.
+
+Public API:
+  ingest_text(content, source, tenant_id, metadata) → int (chunks stored)
+  ingest_file(path, tenant_id)                      → int (chunks stored)
+  query_documents(question, tenant_id, n_results)   → list[dict]
+  list_sources(tenant_id)                            → list[dict] (unique source names)
+"""
 import hashlib
 import os
 

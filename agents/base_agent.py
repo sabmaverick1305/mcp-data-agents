@@ -1,4 +1,33 @@
-"""Shared async agent loop: Claude + MCP tools, retry, error handling, tracing."""
+"""
+Shared async agent execution loop — the common runtime for all specialist agents.
+
+Every agent in the system (semantic, benchmark, insight) delegates to run_agent_loop()
+defined here. This avoids duplicating retry logic, tool-call dispatch, error handling,
+and token tracing across three separate agent modules.
+
+Execution flow (single attempt):
+  1. Fetch Anthropic-format tool definitions from the orchestrator for the given servers.
+  2. Call Claude with the agent's system prompt + user question + tool list.
+  3. If stop_reason == "end_turn" or no tool_use blocks → return the text response.
+  4. For each tool_use block:
+       a. Run check_tool_call() (security allowlist) — block if not permitted.
+       b. Dispatch to orchestrator.call_tool() — returns JSON string.
+  5. Append tool results to the message list and loop back to step 2.
+
+Retry policy:
+  MAX_RETRIES = 3, exponential back-off (1s → 2s → 4s).
+  Retries on: RateLimitError, 5xx APIStatusError.
+  Non-retryable errors (4xx, unexpected exceptions) return an error string immediately.
+
+Return value:
+  Always a string — either the model's final text response or an "[Agent error: ...]"
+  sentinel. Callers (api.py, main.py, eval/runner.py) handle the sentinel gracefully.
+
+Security integration:
+  check_tool_call() is called before every MCP dispatch. Blocked calls return a
+  JSON error object that the model sees as a tool result, allowing it to report
+  the failure rather than silently skipping the tool.
+"""
 import asyncio
 import json
 

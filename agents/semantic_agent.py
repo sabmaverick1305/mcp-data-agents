@@ -1,4 +1,27 @@
-"""Semantic Agent — KPI and metric questions via Power BI MCP."""
+"""
+Semantic Agent — pre-defined KPI and metric retrieval via the Power BI MCP server.
+
+Role in the pipeline:
+  Handles questions about well-defined business metrics that are modelled in the
+  Power BI semantic layer. These include aggregated KPIs that can be answered without
+  ad-hoc SQL — total revenue, gross margin %, average order value, MoM/YoY growth,
+  and customer lifetime value.
+
+When the Planner routes here:
+  - "What is our gross margin this quarter?" → semantic only
+  - "Why did revenue drop in Q1?" → semantic + insight (KPI context + SQL drill-down)
+  - "Executive summary of 2024" → semantic + benchmark + insight (all agents)
+
+MCP server used: powerbi_server.py (FastMCP "powerbi-semantic")
+MCP tools available:
+  list_semantic_models()               — discover available models and measures
+  get_semantic_model(model_id)         — fetch full model schema
+  get_metric(metric_name, time_period, dimension) — compute a named KPI
+
+This module is intentionally thin — all retry, tool dispatch, and tracing logic lives
+in agents/base_agent.run_agent_loop(). Adding new KPI tools only requires updating
+powerbi_server.py; this agent file does not change.
+"""
 import anthropic
 from observability import QueryTrace
 from orchestrator import MCPOrchestrator

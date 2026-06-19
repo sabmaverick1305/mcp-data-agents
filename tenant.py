@@ -1,4 +1,31 @@
-"""Tenant context: extraction from HTTP headers and propagation through the pipeline."""
+"""
+Tenant context — identity extraction from HTTP headers and pipeline propagation.
+
+TenantContext is the lightweight identity carrier that flows from the API boundary
+through the entire request pipeline. It contains three fields:
+  tenant_id   Namespace key for RAG collections, cache keys, cost ledger, rate limits,
+              and audit log. Extracted from X-Tenant-ID header (api_key mode) or the
+              "tid" JWT claim (jwt mode). Defaults to "default".
+  user_id     Individual user within a tenant. Extracted from X-User-ID header or
+              JWT "sub" claim. Used for per-user cost attribution in the ledger.
+  team_id     Cost-centre grouping for chargeback reporting. Extracted from X-Team-ID
+              header or JWT "team" claim. Drives the /costs/by-team endpoint.
+
+TenantContext is frozen (immutable) to prevent accidental mutation across the pipeline.
+
+Two extraction paths:
+  auth.require_auth()            — the primary path. Validates the API key or JWT first,
+                                   then calls _tenant_from_headers() or _tenant_from_jwt()
+                                   internally. All REST endpoints use this via Depends().
+  get_tenant_from_request()      — unauthenticated extraction for the SSE streaming
+                                   endpoint, which cannot use FastAPI Depends because it
+                                   returns a generator. Auth must be validated externally
+                                   before calling this function.
+
+apply_to_trace(tenant, trace):
+  Stamps all three identity fields onto a QueryTrace so the cost ledger, Prometheus
+  metrics, and Redis audit log can attribute every query to the correct tenant/user/team.
+"""
 from dataclasses import dataclass
 
 

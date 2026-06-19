@@ -1,4 +1,45 @@
-"""MCP server simulating Tableau — exposes dashboard metadata and benchmark comparisons."""
+"""
+MCP server — Tableau dashboard simulation (FastMCP "tableau-dashboards").
+
+Exposes dashboard metadata and comparative benchmark data through the MCP tool protocol,
+mirroring the interface of a real Tableau Connected App / REST API. Backed by the SQLite
+warehouse (data/warehouse.db). The Benchmark Agent uses this server for comparisons,
+rankings, and target-attainment analysis.
+
+Purpose in the system:
+  While the Power BI server handles scalar KPIs, the Tableau server handles relative
+  performance — how regions compare against each other and against targets, how product
+  categories rank by margin, which customers are top contributors, and how quarterly
+  revenue has trended.
+
+Dashboards registered (metadata only — data comes from SQL):
+  regional_performance   — revenue vs annual targets by region + attainment %
+  product_trends         — category-level revenue, margin, and growth
+  customer_segments      — revenue and transaction volume by segment
+  executive_kpis         — quarterly performance and trend overview
+
+MCP tools exposed:
+  list_dashboards()
+    → list of {id, name, description} for all registered dashboards
+
+  get_dashboard_summary(dashboard_id)
+    → metadata + available view names for one dashboard
+
+  get_benchmark_data(benchmark_type, time_period)
+    → benchmark_type: regional_vs_target | category_performance |
+                      segment_comparison | quarterly_trend
+      Returns a JSON array of rows with all relevant computed columns.
+
+  get_top_performers(entity_type, metric, limit, time_period)
+    → entity_type: products | customers | regions
+      metric:      revenue | transactions | margin_pct (products only)
+      Returns top N performers sorted by metric, descending.
+
+Production replacement:
+  Replace SQLite queries with calls to the Tableau REST API
+  (GET /workbooks/{id}/views/{view_id}/data) or the Tableau Hyper API for
+  direct extract access. Tool signatures remain stable.
+"""
 import json
 import os
 import sqlite3

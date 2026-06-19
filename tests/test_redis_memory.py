@@ -1,4 +1,22 @@
-"""Tests for RedisMemory — mocked redis client, all public methods."""
+"""
+Tests for redis_memory.RedisMemory — mocked async Redis client covering all public methods.
+
+Design: RedisMemory is tested entirely with a mock Redis client (unittest.mock.AsyncMock).
+No real Redis process is required. The mock_redis fixture returns an AsyncMock with all
+commonly-used Redis commands pre-configured. The mem fixture wraps connect() with
+patch("redis.asyncio.from_url") so the mock client is injected.
+
+Test coverage:
+  connect / available     connect_success → available=True; connect_failure → fails open (False)
+  L1 exact cache          get_exact miss, get_exact hit (parses JSON), set_exact calls redis.set
+                          with correct key+payload, invalidate_exact calls redis.delete,
+                          unavailable instance returns None without error
+  Session history         get_history returns [] on empty, parses list of JSON entries correctly
+  Rate limiting           allows first request (count=1 ≤ limit), blocks when count > RATE_LIMIT_RPM,
+                          fails open (returns True) when Redis is unavailable
+
+All tests are async (pytest-asyncio). Fixtures use the async fixture pattern (async def mem).
+"""
 import json
 import time
 import pytest

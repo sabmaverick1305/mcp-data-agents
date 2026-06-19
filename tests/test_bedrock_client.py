@@ -1,4 +1,22 @@
-"""Tests for bedrock_client — factory returns correct type per env var."""
+"""
+Tests for bedrock_client.py — LLM client factory, model ID selection, and backend labels.
+
+Each test class reloads bedrock_client after patching USE_BEDROCK and BEDROCK_REGION via
+monkeypatch + importlib.reload(). This is needed because the module reads env vars at
+import time. The helper _reload() centralises this pattern.
+
+TestDirectMode (USE_BEDROCK=false):
+  test_make_client_returns_async_anthropic   make_client() returns an AsyncAnthropic instance
+  test_default_model_is_sonnet               default_model() contains "claude"
+  test_backend_label_mentions_anthropic      backend_label() contains "Anthropic"
+
+TestBedrockMode (USE_BEDROCK=true):
+  test_make_client_returns_bedrock_client    make_client() returns AsyncAnthropicBedrock
+                                             (skipped if anthropic[bedrock] not installed)
+  test_default_model_is_bedrock_id           default_model() contains "anthropic." prefix
+  test_backend_label_mentions_bedrock        backend_label() contains "Bedrock"
+  test_custom_model_id_via_env               BEDROCK_MODEL_ID env var overrides the default
+"""
 import importlib
 import pytest
 
