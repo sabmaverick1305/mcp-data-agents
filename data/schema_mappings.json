@@ -1,0 +1,108 @@
+{
+  "kaggle_sales": {
+    "description": "Kaggle Sample Sales Data - ~500 records",
+    "source": "https://www.kaggle.com/datasets/kyanyoga/sample-sales-data",
+    "table": "sales_fact",
+    "csv_columns": {
+      "Order Date": "date_id",
+      "Quantity": "quantity",
+      "Unit Price": "revenue"
+    },
+    "date_format": "%m/%d/%Y",
+    "transformations": [
+      {
+        "field": "revenue",
+        "operation": "multiply",
+        "value": 1,
+        "description": "Unit Price per item"
+      },
+      {
+        "field": "cost",
+        "operation": "set_from_revenue",
+        "ratio": 0.4,
+        "description": "Assume 40% of revenue is cost"
+      }
+    ],
+    "dimensions": {
+      "customer": {
+        "csv_field": "Customer Name",
+        "target_table": "customer_dim",
+        "attributes": ["customer_name"]
+      },
+      "location": {
+        "csv_field": "City",
+        "target_table": "region_dim",
+        "attributes": ["region_name"]
+      }
+    }
+  },
+  "uci_retail": {
+    "description": "UCI Online Retail Dataset - ~500K transactions, real e-commerce",
+    "source": "https://archive.ics.uci.edu/ml/datasets/online+retail",
+    "table": "sales_fact",
+    "csv_columns": {
+      "InvoiceDate": "date_id",
+      "Quantity": "quantity",
+      "UnitPrice": "revenue"
+    },
+    "date_format": "%d/%m/%Y %H:%M",
+    "preprocessing": [
+      {
+        "field": "Quantity",
+        "rule": "remove_negative",
+        "description": "UCI data has returned items with negative qty"
+      },
+      {
+        "field": "UnitPrice",
+        "rule": "remove_zero",
+        "description": "Some items have £0 price"
+      }
+    ],
+    "transformations": [
+      {
+        "field": "revenue",
+        "operation": "multiply_quantity",
+        "description": "Total revenue = UnitPrice * Quantity"
+      },
+      {
+        "field": "cost",
+        "operation": "estimate",
+        "ratio": 0.65,
+        "description": "Estimate cost at 65% of revenue"
+      },
+      {
+        "field": "gross_profit",
+        "operation": "revenue_minus_cost",
+        "description": "Margin = revenue - cost"
+      }
+    ],
+    "dimensions": {
+      "customer": {
+        "csv_field": "CustomerID",
+        "target_table": "customer_dim",
+        "attributes": ["customer_id"]
+      },
+      "product": {
+        "csv_field": "Description",
+        "target_table": "product_dim",
+        "attributes": ["product_name"]
+      },
+      "country": {
+        "csv_field": "Country",
+        "target_table": "region_dim",
+        "attributes": ["region_name"]
+      }
+    }
+  },
+  "synthetic": {
+    "description": "Programmatically generated synthetic data",
+    "source": "local",
+    "table": "sales_fact",
+    "csv_columns": {
+      "date_id": "date_id",
+      "quantity": "quantity",
+      "revenue": "revenue"
+    },
+    "date_format": "%Y-%m-%d"
+  }
+}

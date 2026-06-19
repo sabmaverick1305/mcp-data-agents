@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-agents-service
+  namespace: mcp-agents
+  labels:
+    app: mcp-agents-app
+spec:
+  selector:
+    app: mcp-agents-app
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+  type: ClusterIP    # fronted by the Ingress below; use LoadBalancer for direct external access

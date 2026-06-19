@@ -1,0 +1,130 @@
+"""Tests for MCP server tools — SQL safety, schema, basic queries."""
+import asyncio
+import json
+import sys
+import pytest
+
+from mcp import ClientSession
+from mcp.client.stdio import stdio_client, StdioServerParameters
+
+
+def _params(script: str) -> StdioServerParameters:
+    import os
+    path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "servers", script)
+    return StdioServerParameters(command=sys.executable, args=[path])
+
+
+# ── Snowflake server ───────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_snowflake_list_tables():
+    async with stdio_client(_params("snowflake_server.py")) as (r, w):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            res = await s.call_tool("list_tables", {})
+            tables = json.loads(res.content[0].text)
+            assert "sales_fact" in tables
+            assert "product_dim" in tables
+
+
+@pytest.mark.asyncio
+async def test_snowflake_select_query():
+    async with stdio_client(_params("snowflake_server.py")) as (r, w):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            res = await s.call_tool(
+                "run_sql_query",
+                {"query": "SELECT COUNT(*) as n FROM sales_fact"},
+            )
+            rows = json.loads(res.content[0].text)
+            assert rows[0]["n"] > 0
+
+
+@pytest.mark.asyncio
+async def test_snowflake_blocks_drop():
+    async with stdio_client(_params("snowflake_server.py")) as (r, w):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            res = await s.call_tool(
+                "run_sql_query",
+                {"query": "DROP TABLE sales_fact"},
+            )
+            result = json.loads(res.content[0].text)
+            assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_snowflake_blocks_non_select():
+    async with stdio_client(_params("snowflake_server.py")) as (r, w):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            res = await s.call_tool(
+                "run_sql_query",
+                {"query": "DELETE FROM sales_fact WHERE 1=1"},
+            )
+            result = json.loads(res.content[0].text)
+            assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_snowflake_describe_table():
+    async with stdio_client(_params("snowflake_server.py")) as (r, w):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            res = await s.call_tool("describe_table", {"table_name": "sales_fact"})
+            schema = json.loads(res.content[0].text)
+            col_names = [c["name"] for c in schema["columns"]]
+            assert "revenue" in col_names
+            assert "gross_profit" in col_names
+
+
+# ── Power BI server ────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_powerbi_list_models():
+    async with stdio_client(_params("powerbi_server.py")) as (r, w):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            res = await s.call_tool("list_semantic_models", {})
+            models = json.loads(res.content[0].text)
+            ids = [m["id"] for m in models]
+            assert "sales_performance" in ids
+
+
+@pytest.mark.asyncio
+async def test_powerbi_total_revenue_metric():
+    async with stdio_client(_params("powerbi_server.py")) as (r, w):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            res = await s.call_tool(
+                "get_metric",
+                {"metric_name": "total_revenue", "time_period": "2024-Q1"},
+            )
+            result = json.loads(res.content[0].text)
+            assert result["data"]["total_revenue"] > 0
+
+
+# ── Tableau server ─────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_tableau_list_dashboards():
+    async with stdio_client(_params("tableau_server.py")) as (r, w):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            res = await s.call_tool("list_dashboards", {})
+            dashboards = json.loads(res.content[0].text)
+            ids = [d["id"] for d in dashboards]
+            assert "regional_performance" in ids
+
+
+@pytest.mark.asyncio
+async def test_tableau_quarterly_trend():
+    async with stdio_client(_params("tableau_server.py")) as (r, w):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            res = await s.call_tool(
+                "get_benchmark_data",
+                {"benchmark_type": "quarterly_trend"},
+            )
+            result = json.loads(res.content[0].text)
+            assert len(result["data"]) >= 4

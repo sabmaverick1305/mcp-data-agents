@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# Dev / test
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+tests/
+eval/
+*.log
+
+# Local data (mounted as volumes in compose/k8s)
+data/chroma/
+data/warehouse.db
+data/cost_ledger.db
+data/raw/
+
+# Secrets / env
+.env
+.env.*
+*.env
+
+# Git
+.git/
+.gitignore
+
+# Docs / diagrams
+*.md
+*.mmd
+*.png
+
+# IDE
+.vscode/
+.idea/

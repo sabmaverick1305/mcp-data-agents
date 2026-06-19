@@ -1,0 +1,38 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: mcp-agents
+    static_configs:
+      - targets: ["app:8000"]
+    metrics_path: /metrics
+
+  - job_name: redis
+    static_configs:
+      - targets: ["redis:6379"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+alerting:
+  alertmanagers: []
+
+# Suggested alert rules (wire into Alertmanager when ready):
+#
+# - alert: HighLatency
+#   expr: histogram_quantile(0.95, rate(mcp_agents_query_latency_seconds_bucket[5m])) > 15
+#   annotations:
+#     summary: "p95 query latency > 15s"
+#
+# - alert: HighCostRate
+#   expr: rate(mcp_agents_cost_usd_total[1h]) > 1.0
+#   annotations:
+#     summary: "LLM spend > $1/hour"
+#
+# - alert: LowCacheHitRate
+#   expr: rate(mcp_agents_queries_total{cache_hit="true"}[30m])
+#         / rate(mcp_agents_queries_total[30m]) < 0.2
+#   annotations:
+#     summary: "Cache hit rate < 20%"

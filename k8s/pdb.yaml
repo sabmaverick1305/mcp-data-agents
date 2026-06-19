@@ -1,0 +1,39 @@
+# PodDisruptionBudgets guarantee minimum availability during:
+#   - kubectl drain (node maintenance / EKS managed node group upgrades)
+#   - Rolling deployments
+#   - Cluster autoscaler scale-down
+
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mcp-agents-app-pdb
+  namespace: mcp-agents
+spec:
+  minAvailable: 1       # at least 1 app pod stays up during any disruption
+  selector:
+    matchLabels:
+      app: mcp-agents-app
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis-pdb
+  namespace: mcp-agents
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: redis
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: chromadb-pdb
+  namespace: mcp-agents
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: chromadb

@@ -1,0 +1,146 @@
+# Deny all traffic by default, then allow only what's needed.
+# Rule of thumb: each service only speaks to its declared dependencies.
+
+# ── Default deny for the namespace ───────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: mcp-agents
+spec:
+  podSelector: {}       # matches every pod in the namespace
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# ── App pod rules ─────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-app
+  namespace: mcp-agents
+spec:
+  podSelector:
+    matchLabels:
+      app: mcp-agents-app
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Accept traffic from the Ingress controller
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 8000
+    # Accept Prometheus scrape
+    - from:
+        - podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - port: 8000
+  egress:
+    # Redis
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - port: 6379
+    # ChromaDB
+    - to:
+        - podSelector:
+            matchLabels:
+              app: chromadb
+      ports:
+        - port: 8000
+    # AWS Bedrock / Anthropic API (HTTPS)
+    - ports:
+        - port: 443
+    # Kubernetes DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+---
+# ── Redis pod rules ───────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-redis
+  namespace: mcp-agents
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Only the app may connect to Redis
+    - from:
+        - podSelector:
+            matchLabels:
+              app: mcp-agents-app
+      ports:
+        - port: 6379
+  egress: []            # Redis needs no outbound connections
+
+---
+# ── ChromaDB pod rules ────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-chromadb
+  namespace: mcp-agents
+spec:
+  podSelector:
+    matchLabels:
+      app: chromadb
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: mcp-agents-app
+      ports:
+        - port: 8000
+  egress: []
+
+---
+# ── Prometheus pod rules ──────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus
+  namespace: mcp-agents
+spec:
+  podSelector:
+    matchLabels:
+      app: prometheus
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Grafana queries Prometheus
+    - from:
+        - podSelector:
+            matchLabels:
+              app: grafana
+      ports:
+        - port: 9090
+  egress:
+    # Scrape the app
+    - to:
+        - podSelector:
+            matchLabels:
+              app: mcp-agents-app
+      ports:
+        - port: 8000

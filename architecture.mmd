@@ -1,0 +1,87 @@
+%%{init: {"theme": "base", "themeVariables": {"background": "#ffffff", "primaryColor": "#dbeafe", "edgeLabelBackground": "#ffffff", "clusterBkg": "#eff6ff"}}}%%
+flowchart LR
+
+    subgraph CLIENTS["① Clients"]
+        direction LR
+        UI["🖥️ CLI / main.py<br>interactive prompt + feedback"]
+        API_CLIENT["🌐 API clients<br>REST + SSE"]
+    end
+
+    subgraph API_LAYER["② API + Validation"]
+        direction TB
+        FASTAPI["⚡ FastAPI / api.py<br>query / stream / ingest / metrics"]
+        TENANT["🏢 tenant.py<br>tenant/user/team attribution"]
+        SECURITY["🔒 security.py<br>query/ingest validation<br>wrap RAG context"]
+    end
+
+    subgraph RAG_LAYER["③ RAG & Semantic Cache"]
+        direction TB
+        CACHE["🧠 rag/store.py<br>qa_history_{tenant}<br>ChromaDB semantic cache"]
+        DOMAIN["📚 domain_knowledge<br>shared schema + metric docs"]
+        INGEST["📄 rag/ingest.py<br>tenant-scoped document chunks"]
+    end
+
+    subgraph AGENT_LAYER["④ Planning + Agents"]
+        direction LR
+        PLANNER["📋 planner.py<br>route to semantic / benchmark / insight<br>JSON plan validation"]
+        SEMANTIC["🔍 semantic_agent.py<br>KPIs / metrics / semantic layer"]
+        BENCHMARK["📊 benchmark_agent.py<br>benchmarks / comparisons / trends"]
+        INSIGHT["💡 insight_agent.py<br>SQL deep dive / root cause"]
+        SYNTHESIS["🧪 final synthesis<br>merge agent outputs"]
+    end
+
+    subgraph TOOL_LAYER["⑤ MCP Orchestrator + Servers"]
+        direction LR
+        ORCH["⚙️ orchestrator.py<br>tool routing / locks / timeouts"]
+        PBI["Power BI MCP<br>servers/powerbi_server.py"]
+        TABLEAU["Tableau MCP<br>servers/tableau_server.py"]
+        SNOWFLAKE["Snowflake MCP<br>servers/snowflake_server.py"]
+    end
+
+    subgraph STORAGE_LAYER["⑥ Storage & Observability"]
+        direction LR
+        WAREHOUSE["🗄️ warehouse.db<br>sales_fact + dimension tables"]
+        COST["💰 cost_ledger.py<br>query cost / attribution / aggregation"]
+        METRICS["📊 observability.py + metrics.py<br>Prometheus metrics + traces"]
+    end
+
+    subgraph MONITORING["⑦ Monitoring"]
+        direction LR
+        PROM["Prometheus<br>GET /metrics scrape"]
+        GRAFANA["Grafana<br>latency / cost / quality / tenant dashboards"]
+    end
+
+    UI --> FASTAPI
+    API_CLIENT --> FASTAPI
+    FASTAPI --> TENANT
+    FASTAPI --> SECURITY
+    SECURITY --> CACHE
+    FASTAPI --> CACHE
+    CACHE -->|cache hit| FASTAPI
+    CACHE -->|cache miss + context| PLANNER
+    FASTAPI --> PLANNER
+    FASTAPI --> INGEST
+    INGEST --> CACHE
+    INGEST --> DOMAIN
+    PLANNER --> SEMANTIC
+    PLANNER --> BENCHMARK
+    SEMANTIC --> INSIGHT
+    BENCHMARK --> INSIGHT
+    SEMANTIC --> ORCH
+    BENCHMARK --> ORCH
+    INSIGHT --> ORCH
+    ORCH --> PBI
+    ORCH --> TABLEAU
+    ORCH --> SNOWFLAKE
+    PBI --> WAREHOUSE
+    TABLEAU --> WAREHOUSE
+    SNOWFLAKE --> WAREHOUSE
+    FASTAPI --> METRICS
+    METRICS --> COST
+    METRICS --> PROM
+    PROM --> GRAFANA
+    COST --> GRAFANA
+    TENANT --> COST
+    TENANT --> CACHE
+    DOMAIN --> CACHE
+    CACHE --> DOMAIN

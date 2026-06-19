@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment secrets — NEVER commit
+.env
+.env.*
+!.env.example
+
+# SQLite databases (seeded at runtime)
+data/warehouse.db
+data/cost_ledger.db
+data/*.db
+
+# ChromaDB local store (binary runtime data)
+chroma_data/
+*.chroma/
+data/chroma/
+
+# Runtime data artifacts
+data/cache_audit.jsonl
+data/conversation_history_*.json
+data/raw/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/

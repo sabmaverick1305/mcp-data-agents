@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mcp-agents-config
+  namespace: mcp-agents
+data:
+  # LLM backend
+  USE_BEDROCK: "true"
+  BEDROCK_REGION: "us-east-1"
+  BEDROCK_MODEL_ID: "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+
+  # Backing services (K8s DNS names)
+  REDIS_URL: "redis://redis-service:6379"
+  CHROMA_HOST: "chromadb-service"
+  CHROMA_PORT: "8000"
+
+  # Auth (mode only — keys go in secret.yaml)
+  AUTH_MODE: "api_key"
+  ALLOWED_TENANTS: ""          # empty = allow any authenticated tenant
+  JWKS_URL: ""                 # set when switching AUTH_MODE to jwt
+
+  # Logging
+  LOG_FORMAT: "json"
+  LOG_LEVEL: "INFO"
+  APP_ENV: "prod"
+
+  # App behaviour
+  SEED_MODE: "demo"
+  REDIS_RATE_LIMIT: "120"
+  PYTHONUNBUFFERED: "1"
