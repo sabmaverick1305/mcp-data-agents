@@ -42,6 +42,20 @@ from security import wrap_rag_context
 MODEL = "claude-sonnet-4-6"
 _VALID_AGENTS = {"semantic", "benchmark", "insight"}
 
+# Core problem statement — always present in every planner call regardless of RAG retrieval.
+# Describes the business context agents must reason within.
+PROBLEM_CONTEXT = """Business context:
+- B2B SaaS company with sales across 4 regions: North America ($5M target), Europe ($3.5M),
+  Asia Pacific ($2.8M), Latin America ($1.5M) — annual targets.
+- Products: Software, Infrastructure, Security, Services categories.
+- Customers: Enterprise, Mid-Market, SMB segments.
+- Key anomaly: Q1 2024 revenue ~$1.55M — a sharp drop from ~$5.9M in prior quarters.
+  Root cause is low transaction volume (1–4 txns/day vs 5–14 normal), not price changes.
+  Q2 2024 recovered to ~$5.6M. Cross-source investigation is needed for Q1 dip questions.
+- Warehouse schema: sales_fact (sale_id, date_id, product_id, customer_id, region_id,
+  quantity, revenue, cost, gross_profit) joined to region_dim, product_dim, customer_dim,
+  date_dim (date_id = YYYY-MM-DD, year, quarter 1–4, month 1–12)."""
+
 _SYSTEM_BASE = """You are a Planner Agent for a multi-source data analytics platform.
 
 Three specialized agents are available:
@@ -63,6 +77,14 @@ Respond with ONLY a JSON object (no markdown) in this exact shape:
 }
 
 Only include agents that are genuinely needed."""
+
+# Static block sent with cache_control so Anthropic caches the encoded prefix.
+# Dynamic content (RAG context, history) is appended as a separate uncached block.
+_SYSTEM_STATIC_BLOCK = {
+    "type": "text",
+    "text": _SYSTEM_BASE + "\n\n" + PROBLEM_CONTEXT,
+    "cache_control": {"type": "ephemeral"},
+}
 
 
 def _validate_plan(plan: dict) -> list[str]:
@@ -117,18 +139,25 @@ async def create_plan(
     conversation_history: list[dict] | None = None,
     trace: QueryTrace | None = None,
 ) -> dict:
-    system = _SYSTEM_BASE
+    # Always start with the cached static block (instructions + PROBLEM_CONTEXT).
+    # Dynamic blocks (history, RAG) follow without cache_control so only the
+    # stable prefix is stored in Anthropic's prompt cache.
+    system_blocks: list[dict] = [_SYSTEM_STATIC_BLOCK]
 
+    dynamic_parts: list[str] = []
     if conversation_history:
         recent = conversation_history[-3:]
         history_text = "\n".join(
             f"Q: {h['question']}\nA (summary): {h['answer'][:200]}…"
             for h in recent
         )
-        system += f"\n\nRecent conversation (use for follow-up resolution):\n{history_text}"
+        dynamic_parts.append(f"Recent conversation (use for follow-up resolution):\n{history_text}")
 
     if rag_context:
-        system += f"\n\n{wrap_rag_context(rag_context)}"
+        dynamic_parts.append(wrap_rag_context(rag_context))
+
+    if dynamic_parts:
+        system_blocks.append({"type": "text", "text": "\n\n".join(dynamic_parts)})
 
     last_error: str = ""
 
@@ -145,7 +174,7 @@ async def create_plan(
         response = await client.messages.create(
             model=MODEL,
             max_tokens=512,
-            system=system,
+            system=system_blocks,
             messages=[{"role": "user", "content": prompt}],
         )
 

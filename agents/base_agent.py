@@ -71,6 +71,16 @@ async def run_agent_loop(
     return "[Agent error: max retries exceeded]"
 
 
+def _cached_system(system_prompt: str) -> list[dict]:
+    """Wrap a static system prompt string as a cached Anthropic content block.
+
+    Anthropic caches everything up to and including the block marked
+    cache_control=ephemeral, so identical system prompts across calls within
+    the 5-minute window are never re-encoded, cutting input token costs.
+    """
+    return [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
+
+
 async def _loop(
     client: anthropic.AsyncAnthropic,
     orchestrator: MCPOrchestrator,
@@ -79,11 +89,12 @@ async def _loop(
     messages: list[dict],
     trace: QueryTrace | None,
 ) -> str:
+    system_blocks = _cached_system(system_prompt)
     while True:
         response = await client.messages.create(
             model=MODEL,
             max_tokens=2048,
-            system=system_prompt,
+            system=system_blocks,
             tools=tools,
             messages=messages,
         )

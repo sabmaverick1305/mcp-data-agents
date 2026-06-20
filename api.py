@@ -60,6 +60,13 @@ _SYNTHESIS_SYSTEM = (
     "Be direct — avoid filler phrases."
 )
 
+# Cached content block for the synthesis system prompt.
+# Static text never changes between calls, so Anthropic's prompt cache
+# avoids re-encoding it on every synthesis request.
+_SYNTHESIS_SYSTEM_BLOCK = [
+    {"type": "text", "text": _SYNTHESIS_SYSTEM, "cache_control": {"type": "ephemeral"}}
+]
+
 # ── Shared singletons (tenant-agnostic) ───────────────────────────────────────
 _state: dict = {}
 _rag_cache: dict[str, RAGStore] = {}   # keyed by tenant_id
@@ -237,7 +244,7 @@ async def _run_pipeline(
 
     response = await client.messages.create(
         model=MODEL, max_tokens=2048,
-        system=_SYNTHESIS_SYSTEM,
+        system=_SYNTHESIS_SYSTEM_BLOCK,
         messages=[{"role": "user", "content": synthesis}],
     )
     trace.record_usage(response)
@@ -424,7 +431,7 @@ async def query_stream(
         answer_buf = ""
         async with client.messages.stream(
             model=MODEL, max_tokens=2048,
-            system=_SYNTHESIS_SYSTEM,
+            system=_SYNTHESIS_SYSTEM_BLOCK,
             messages=[{"role": "user", "content": synthesis}],
         ) as stream:
             async for text in stream.text_stream:
