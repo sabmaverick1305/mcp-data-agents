@@ -214,7 +214,23 @@ class RAGStore:
 
     # ── Read ──────────────────────────────────────────────────────────────────
 
-    def retrieve(self, question: str) -> tuple[str | None, str]:
+    def retrieve(
+        self,
+        question: str,
+        cache_threshold: float = CACHE_THRESHOLD,
+        rag_threshold: float   = RAG_THRESHOLD,
+    ) -> tuple[str | None, str]:
+        """
+        Look up a cached answer and/or RAG context for a question.
+
+        Parameters
+        ----------
+        cache_threshold : cosine distance below which a QA entry is a cache hit.
+                          Defaults to CACHE_THRESHOLD (0.10). Pass a tighter value
+                          (e.g. 0.05) for temporal questions via SimilarityRules.
+        rag_threshold   : cosine distance below which a QA entry is injected as
+                          RAG context (but not returned as a cache hit).
+        """
         cached_answer = None
         context_parts: list[str] = []
         ttl_cutoff = time.time() - CACHE_TTL_HOURS * 3600
@@ -228,14 +244,14 @@ class RAGStore:
             incoming_temporal = _temporal_tokens(question)
             for dist, meta in zip(qa_res["distances"][0], qa_res["metadatas"][0]):
                 age_ok = meta.get("cached_at", 0) > ttl_cutoff
-                if dist < CACHE_THRESHOLD and age_ok and cached_answer is None:
+                if dist < cache_threshold and age_ok and cached_answer is None:
                     cached_temporal = _temporal_tokens(meta.get("question", ""))
                     if incoming_temporal and cached_temporal and incoming_temporal != cached_temporal:
                         pass
                     else:
                         cached_answer = meta["answer"]
                         continue
-                if dist < RAG_THRESHOLD and age_ok:
+                if dist < rag_threshold and age_ok:
                     context_parts.append(
                         f"[Relevant past Q&A — similarity {1 - dist:.0%}]\n"
                         f"Q: {meta['question']}\nA: {meta['answer']}"

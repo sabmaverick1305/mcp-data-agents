@@ -39,9 +39,12 @@ from bedrock_client import backend_label, default_model, make_client
 from logging_config import bind_request_context, get_logger
 from cost_ledger import CostLedger
 from data.seed import DB_PATH, seed_database
+from cache_registry import CacheLayer, CacheRegistry
+from context_engine import ContextAssemblyEngine
 from long_term_memory import LongTermMemory
 from observability import ESTIMATED_PIPELINE_COST_USD, QueryTrace
 from orchestrator import MCPOrchestrator
+from query_intelligence import QueryIntelligence
 from rag.ingest import ingest_text, list_sources, query_documents
 from rag.store import RAGStore
 from redis_memory import RedisMemory
@@ -49,6 +52,8 @@ from state_manager import PipelineState, WorkflowStateStore
 from metrics import (
     metrics_response, record_security_block, record_trace,
     update_cache_size, update_mcp_servers,
+    record_cache_hit, record_cache_miss, record_partial_reuse,
+    record_cache_invalidation, record_context_sources,
 )
 from security import check_ingest, check_pii, check_query
 from tenant import TenantContext, apply_to_trace, get_tenant_from_request
@@ -109,8 +114,13 @@ async def lifespan(app: FastAPI):
 
     # STATE & MEMORY LAYER — initialise after Redis connects so WorkflowStateStore
     # can share the same connection pool.
-    _state["workflow"] = WorkflowStateStore(redis_mem.client)
-    _state["ltm"]      = LongTermMemory()
+    _state["workflow"]  = WorkflowStateStore(redis_mem.client)
+    _state["ltm"]       = LongTermMemory()
+
+    # QUERY INTELLIGENCE + CACHE REGISTRY — stateless, constructed once
+    _state["qi"]             = QueryIntelligence()
+    _state["cache_registry"] = CacheRegistry(redis_mem)
+    _state["context_engine"] = ContextAssemblyEngine()
 
     await _state["orchestrator"].start()
     update_mcp_servers(len(_state["orchestrator"].sessions))
@@ -174,56 +184,73 @@ async def _run_pipeline(
     log.info("query.start", question_len=len(question), tenant_id=tenant.tenant_id,
              session_id=session_id)
 
+    # ── Intelligence layer singletons ─────────────────────────────────────────
+    qi:             QueryIntelligence   = _state["qi"]
+    cache_reg:      CacheRegistry       = _state["cache_registry"]
+    ctx_engine:     ContextAssemblyEngine = _state["context_engine"]
+
+    # ── Query Intelligence — classify before any cache lookup ─────────────────
+    intent = qi.analyze(question)
+    tid    = tenant.tenant_id
+
     if workflow:
-        await workflow.begin(session_id, tenant.tenant_id, question)
+        await workflow.begin(session_id, tid, question)
 
     current_stage = "cache_check"
     try:
-        # ── Redis L1 exact cache ──────────────────────────────────────────────
-        if redis_mem and redis_mem.available:
-            exact = await redis_mem.get_exact(tenant.tenant_id, question)
-            if exact:
-                trace.cache_hit        = True
-                trace.avoided_cost_usd = ledger.rolling_avg_cost(tenant.tenant_id)
-                ledger.record(trace)
-                record_trace(trace)
-                # Cache hits bypass the workflow — no session to track
-                if workflow:
-                    await workflow.close(session_id, tenant.tenant_id, exact, [])
-                return exact, trace
+        # ── Cache Registry — unified L1 + L2 lookup with intent-aware thresholds
+        lookup = await cache_reg.lookup(tid, question, intent, rag)
 
-        # ── ChromaDB L2 semantic cache + RAG ─────────────────────────────────
-        cached_answer, rag_context = rag.retrieve(question)
-        doc_chunks = query_documents(question, tenant_id=tenant.tenant_id)
-        if doc_chunks:
-            rag_context += "\n\n" + "\n\n".join(
-                f"[Doc: {c['source']}]\n{c['chunk']}" for c in doc_chunks
-            )
-
-        if cached_answer:
+        if lookup.hit:
+            # Full cache hit (Redis L1 or ChromaDB L2)
             trace.cache_hit        = True
-            trace.avoided_cost_usd = ledger.rolling_avg_cost(tenant.tenant_id)
+            trace.avoided_cost_usd = ledger.rolling_avg_cost(tid)
             ledger.record(trace)
             record_trace(trace)
+            record_cache_hit(lookup.layer.value, intent.query_type.value, tid)
             if workflow:
-                await workflow.close(session_id, tenant.tenant_id, cached_answer, [])
-            return cached_answer, trace
+                await workflow.close(session_id, tid, lookup.answer, [])
+            return lookup.answer, trace
 
-        # ── Long-term memory context (injected before planning) ───────────────
-        if ltm:
-            ltm_context = ltm.get_context_for_planner(tenant.tenant_id, user_id, question)
-            if ltm_context:
-                rag_context = ltm_context + ("\n\n" + rag_context if rag_context else "")
+        # Cache miss — record and proceed to full pipeline
+        record_cache_miss(intent.query_type.value, tid)
+
+        # Partial agent reuse: some agents may have cached results from a similar prior query
+        partial_from_registry = lookup.agent_results   # {agent_name: result}
+        if partial_from_registry:
+            record_partial_reuse(tid)
+
+        # Combine partial results from registry with any explicitly prefilled (replay)
+        parallel_results: dict[str, str] = {**(prefilled_results or {}), **partial_from_registry}
+
+        # ── RAG context using intent-aware thresholds ─────────────────────────
+        rag_context = await cache_reg.get_rag_context(question, intent, rag)
+
+        # ── LTM context ───────────────────────────────────────────────────────
+        ltm_context = ltm.get_context_for_planner(tid, user_id, question) if ltm else ""
+
+        # ── Document chunks ───────────────────────────────────────────────────
+        doc_chunks = query_documents(question, tenant_id=tid)
+
+        # ── Context Assembly Engine — prioritized, budget-enforced context ────
+        ctx_pkg = ctx_engine.assemble(
+            question,
+            rag_context=rag_context,
+            ltm_context=ltm_context,
+            history=history,
+            doc_chunks=doc_chunks,
+        )
+        record_context_sources(ctx_pkg.sources_used, tid)
 
         # ── Plan ─────────────────────────────────────────────────────────────
         current_stage = "planning"
         if workflow:
-            await workflow.set_state(session_id, tenant.tenant_id, PipelineState.PLANNING)
+            await workflow.set_state(session_id, tid, PipelineState.PLANNING)
 
         plan = await planner.create_plan(
             client, question,
-            rag_context=rag_context,
-            conversation_history=history,
+            rag_context=ctx_pkg.to_planner_string(),
+            conversation_history=history[-3:] if history else [],
             trace=trace,
         )
         trace.agents_invoked = plan["agents"]
@@ -232,13 +259,10 @@ async def _run_pipeline(
         # ── Parallel agents (semantic + benchmark) ────────────────────────────
         current_stage = "agents_running"
         if workflow:
-            await workflow.set_state(session_id, tenant.tenant_id, PipelineState.AGENTS_RUNNING)
+            await workflow.set_state(session_id, tid, PipelineState.AGENTS_RUNNING)
 
         sub_traces: dict[str, QueryTrace] = {}
         coros: dict[str, asyncio.coroutines] = {}
-
-        # Replay: skip agents whose results were checkpointed in a prior session
-        parallel_results: dict[str, str] = dict(prefilled_results or {})
 
         for name in ("semantic", "benchmark"):
             if name in plan["agents"] and name not in parallel_results:
@@ -256,9 +280,13 @@ async def _run_pipeline(
                 if workflow:
                     sub = sub_traces[name]
                     await workflow.checkpoint_agent(
-                        session_id, tenant.tenant_id, name, result,
+                        session_id, tid, name, result,
                         sub.input_tokens, sub.output_tokens,
                     )
+                # Store in agent-level partial cache for future reuse
+                await cache_reg.store_agent_result(
+                    tid, name, intent.normalized, result
+                )
 
         # ── Insight agent (sequential — uses parallel results as context) ─────
         if "insight" in plan["agents"] and "insight" not in parallel_results:
@@ -281,14 +309,17 @@ async def _run_pipeline(
             trace.merge_agent_trace("insight", insight_sub)
             if workflow:
                 await workflow.checkpoint_agent(
-                    session_id, tenant.tenant_id, "insight", insight_result,
+                    session_id, tid, "insight", insight_result,
                     insight_sub.input_tokens, insight_sub.output_tokens,
                 )
+            await cache_reg.store_agent_result(
+                tid, "insight", intent.normalized, insight_result
+            )
 
         # ── Synthesis ─────────────────────────────────────────────────────────
         current_stage = "synthesizing"
         if workflow:
-            await workflow.set_state(session_id, tenant.tenant_id, PipelineState.SYNTHESIZING)
+            await workflow.set_state(session_id, tid, PipelineState.SYNTHESIZING)
 
         agent_summaries = "\n\n".join(
             f"## {n.title()} Agent\n{r}" for n, r in parallel_results.items()
@@ -308,39 +339,41 @@ async def _run_pipeline(
 
         if check_pii(answer).allowed:
             rag.store_qa(question, answer, trace.agents_invoked)
-            if redis_mem:
-                await redis_mem.set_exact(tenant.tenant_id, question, answer, trace.agents_invoked)
+            # Write-through via CacheRegistry (Redis L1 + agent cache)
+            await cache_reg.register(
+                tid, question, intent.normalized, answer,
+                trace.agents_invoked, parallel_results,
+            )
         if redis_mem:
-            await redis_mem.append_history(tenant.tenant_id, question, answer)
+            await redis_mem.append_history(tid, question, answer)
         history.append({"question": question, "answer": answer})
         rag.save_history(history)
 
-        # ── Long-term memory — store analysis and auto-reinforce patterns ─────
         if ltm:
-            ltm.store_analysis(
-                tenant.tenant_id, question, answer[:500], trace.agents_invoked
-            )
+            ltm.store_analysis(tid, question, answer[:500], trace.agents_invoked)
 
         ledger.record(trace)
         record_trace(trace)
         update_cache_size(trace.tenant_id, rag.stats()["qa_entries"])
 
         if workflow:
-            await workflow.close(session_id, tenant.tenant_id, answer, trace.agents_invoked)
+            await workflow.close(session_id, tid, answer, trace.agents_invoked)
 
         log.info(
             "query.complete",
             session_id=session_id,
+            query_type=intent.query_type.value,
             latency_s=round(trace.latency, 2),
             cost_usd=round(trace.cost, 5),
             cache_hit=trace.cache_hit,
             agents=trace.agents_invoked,
+            partial_reuse=list(partial_from_registry.keys()),
         )
         return answer, trace
 
     except Exception as exc:
         if workflow:
-            await workflow.mark_failed(session_id, tenant.tenant_id, current_stage, str(exc))
+            await workflow.mark_failed(session_id, tid, current_stage, str(exc))
         raise
 
 
@@ -544,9 +577,43 @@ async def ingest(file: UploadFile, ctx: TenantContext = Depends(require_auth)):
 
 # ── Cache management ──────────────────────────────────────────────────────────
 
+@app.get("/cache/observability")
+async def cache_observability(ctx: TenantContext = Depends(require_auth)):
+    """
+    Unified cache status and observability report across all layers.
+
+    Returns Redis L1 health, ChromaDB L2 entry counts, per-agent cache key counts,
+    and a reference to Prometheus metrics for hit/miss rates and cost savings.
+    """
+    cache_reg: CacheRegistry = _state.get("cache_registry")
+    rag        = _get_rag(ctx.tenant_id)
+    if not cache_reg:
+        return {"status": "cache_registry_unavailable"}
+
+    status = await cache_reg.status(ctx.tenant_id, rag)
+    status["prometheus_metrics"] = "/metrics"
+    status["metric_names"] = [
+        "mcp_agents_cache_hits_total",
+        "mcp_agents_cache_misses_total",
+        "mcp_agents_partial_cache_reuse_total",
+        "mcp_agents_cache_invalidations_total",
+        "mcp_agents_avoided_cost_usd_total",
+        "mcp_agents_context_sources_total",
+    ]
+    return status
+
+
 @app.delete("/cache")
 async def clear_cache_entry(question: str, ctx: TenantContext = Depends(require_auth)):
-    _get_rag(ctx.tenant_id).flag_bad(question)
+    qi        = _state.get("qi")
+    cache_reg: CacheRegistry = _state.get("cache_registry")
+    rag       = _get_rag(ctx.tenant_id)
+    normalized = qi.normalize(question) if qi else question
+    if cache_reg:
+        await cache_reg.invalidate(ctx.tenant_id, question, normalized, rag, reason="manual")
+    else:
+        rag.flag_bad(question)
+    record_cache_invalidation("manual", ctx.tenant_id)
     return {"deleted": question, "tenant_id": ctx.tenant_id}
 
 

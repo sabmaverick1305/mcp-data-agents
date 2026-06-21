@@ -71,6 +71,38 @@ SECURITY_BLOCKS_TOTAL = Counter(
     ["reason"],
 )
 
+# ── Cache Observability counters ──────────────────────────────────────────────
+
+CACHE_HITS_TOTAL = Counter(
+    "mcp_agents_cache_hits_total",
+    "Cache hits by layer and query type",
+    ["layer", "query_type", "tenant_id"],
+)
+
+CACHE_MISSES_TOTAL = Counter(
+    "mcp_agents_cache_misses_total",
+    "Cache misses requiring full pipeline execution",
+    ["query_type", "tenant_id"],
+)
+
+PARTIAL_REUSE_TOTAL = Counter(
+    "mcp_agents_partial_cache_reuse_total",
+    "Queries where at least one agent result was reused from agent cache",
+    ["tenant_id"],
+)
+
+CACHE_INVALIDATIONS_TOTAL = Counter(
+    "mcp_agents_cache_invalidations_total",
+    "Cache entries invalidated by feedback or manual action",
+    ["reason", "tenant_id"],
+)
+
+CONTEXT_SOURCES_TOTAL = Counter(
+    "mcp_agents_context_sources_total",
+    "Context sources used per assembled context package",
+    ["source", "tenant_id"],
+)
+
 # ── Histograms ────────────────────────────────────────────────────────────────
 
 QUERY_LATENCY = Histogram(
@@ -137,6 +169,34 @@ def update_cache_size(tenant_id: str, size: int) -> None:
 def update_mcp_servers(count: int) -> None:
     """Set the number of live MCP server connections."""
     MCP_SERVERS_UP.set(count)
+
+
+def record_cache_hit(layer: str, query_type: str, tenant_id: str) -> None:
+    """Increment cache hit counter for a specific layer (redis_l1 / chroma_l2)."""
+    CACHE_HITS_TOTAL.labels(
+        layer=layer, query_type=query_type, tenant_id=tenant_id
+    ).inc()
+
+
+def record_cache_miss(query_type: str, tenant_id: str) -> None:
+    """Increment cache miss counter — full pipeline will run."""
+    CACHE_MISSES_TOTAL.labels(query_type=query_type, tenant_id=tenant_id).inc()
+
+
+def record_partial_reuse(tenant_id: str) -> None:
+    """Increment partial agent cache reuse counter."""
+    PARTIAL_REUSE_TOTAL.labels(tenant_id=tenant_id).inc()
+
+
+def record_cache_invalidation(reason: str, tenant_id: str) -> None:
+    """Increment invalidation counter (reason: bad_feedback / manual / bulk_rollback)."""
+    CACHE_INVALIDATIONS_TOTAL.labels(reason=reason, tenant_id=tenant_id).inc()
+
+
+def record_context_sources(sources: list[str], tenant_id: str) -> None:
+    """Increment context source counters for each source used in assembly."""
+    for source in sources:
+        CONTEXT_SOURCES_TOTAL.labels(source=source, tenant_id=tenant_id).inc()
 
 
 def metrics_response() -> Response:
