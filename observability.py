@@ -92,6 +92,8 @@ class QueryTrace:
     tenant_id:         str        = "default"
     user_id:           str | None = None
     team_id:           str | None = None
+    # ── State & memory layer ──────────────────────────────────────────────────
+    session_id:        str | None = None  # WorkflowStateStore session; null on cache hit
 
     # ── Token accumulation ────────────────────────────────────────────────────
 
@@ -137,21 +139,22 @@ class QueryTrace:
 
     def to_dict(self) -> dict:
         return {
-            "question":        self.question,
-            "latency_s":       self.latency,
-            "cache_hit":       self.cache_hit,
-            "agents":          self.agents_invoked,
-            "tool_calls":      self.tool_calls,
-            "input_tokens":    self.input_tokens,
-            "output_tokens":   self.output_tokens,
-            "cost_usd":        self.cost,
+            "question":         self.question,
+            "session_id":       self.session_id,
+            "latency_s":        self.latency,
+            "cache_hit":        self.cache_hit,
+            "agents":           self.agents_invoked,
+            "tool_calls":       self.tool_calls,
+            "input_tokens":     self.input_tokens,
+            "output_tokens":    self.output_tokens,
+            "cost_usd":         self.cost,
             "avoided_cost_usd": self.avoided_cost_usd,
-            "plan_confidence": self.plan_confidence,
-            "agent_costs":     {k: v.to_dict() for k, v in self.agent_costs.items()},
-            "feedback":        self.feedback,
-            "tenant_id":       self.tenant_id,
-            "user_id":         self.user_id,
-            "team_id":         self.team_id,
+            "plan_confidence":  self.plan_confidence,
+            "agent_costs":      {k: v.to_dict() for k, v in self.agent_costs.items()},
+            "feedback":         self.feedback,
+            "tenant_id":        self.tenant_id,
+            "user_id":          self.user_id,
+            "team_id":          self.team_id,
         }
 
     def print_summary(self) -> None:

@@ -26,9 +26,10 @@ import asyncio
 import json
 import os
 import time
+import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -38,11 +39,13 @@ from bedrock_client import backend_label, default_model, make_client
 from logging_config import bind_request_context, get_logger
 from cost_ledger import CostLedger
 from data.seed import DB_PATH, seed_database
+from long_term_memory import LongTermMemory
 from observability import ESTIMATED_PIPELINE_COST_USD, QueryTrace
 from orchestrator import MCPOrchestrator
 from rag.ingest import ingest_text, list_sources, query_documents
 from rag.store import RAGStore
 from redis_memory import RedisMemory
+from state_manager import PipelineState, WorkflowStateStore
 from metrics import (
     metrics_response, record_security_block, record_trace,
     update_cache_size, update_mcp_servers,
@@ -104,6 +107,11 @@ async def lifespan(app: FastAPI):
     await redis_mem.connect()        # fail-open: unavailable Redis doesn't abort startup
     _state["redis"] = redis_mem
 
+    # STATE & MEMORY LAYER — initialise after Redis connects so WorkflowStateStore
+    # can share the same connection pool.
+    _state["workflow"] = WorkflowStateStore(redis_mem.client)
+    _state["ltm"]      = LongTermMemory()
+
     await _state["orchestrator"].start()
     update_mcp_servers(len(_state["orchestrator"].sessions))
 
@@ -140,16 +148,22 @@ async def _run_pipeline(
     question: str,
     user_id: str | None = None,
     team_id: str | None = None,
+    prefilled_results: dict[str, str] | None = None,  # for replay: skip already-done agents
 ) -> tuple[str, QueryTrace]:
     tenant       = ctx
     client       = _state["client"]
     orchestrator = _state["orchestrator"]
     ledger       = _state["ledger"]
-    redis_mem: RedisMemory = _state.get("redis")
+    redis_mem: RedisMemory         = _state.get("redis")
+    workflow:   WorkflowStateStore = _state.get("workflow")
+    ltm:        LongTermMemory     = _state.get("ltm")
     rag          = _get_rag(tenant.tenant_id)
     history      = await _get_history(tenant.tenant_id)
 
-    trace = QueryTrace(question=question)
+    # Generate a session ID for workflow state tracking
+    session_id = uuid.uuid4().hex[:12]
+
+    trace = QueryTrace(question=question, session_id=session_id)
     apply_to_trace(tenant, trace)
     if user_id:
         trace.user_id = user_id
@@ -157,119 +171,177 @@ async def _run_pipeline(
         trace.team_id = team_id
 
     bind_request_context(tenant.tenant_id, user_id or tenant.user_id)
-    log.info("query.start", question_len=len(question), tenant_id=tenant.tenant_id)
+    log.info("query.start", question_len=len(question), tenant_id=tenant.tenant_id,
+             session_id=session_id)
 
-    # ── Redis L1 exact cache ──────────────────────────────────────────────────
-    if redis_mem and redis_mem.available:
-        exact = await redis_mem.get_exact(tenant.tenant_id, question)
-        if exact:
+    if workflow:
+        await workflow.begin(session_id, tenant.tenant_id, question)
+
+    current_stage = "cache_check"
+    try:
+        # ── Redis L1 exact cache ──────────────────────────────────────────────
+        if redis_mem and redis_mem.available:
+            exact = await redis_mem.get_exact(tenant.tenant_id, question)
+            if exact:
+                trace.cache_hit        = True
+                trace.avoided_cost_usd = ledger.rolling_avg_cost(tenant.tenant_id)
+                ledger.record(trace)
+                record_trace(trace)
+                # Cache hits bypass the workflow — no session to track
+                if workflow:
+                    await workflow.close(session_id, tenant.tenant_id, exact, [])
+                return exact, trace
+
+        # ── ChromaDB L2 semantic cache + RAG ─────────────────────────────────
+        cached_answer, rag_context = rag.retrieve(question)
+        doc_chunks = query_documents(question, tenant_id=tenant.tenant_id)
+        if doc_chunks:
+            rag_context += "\n\n" + "\n\n".join(
+                f"[Doc: {c['source']}]\n{c['chunk']}" for c in doc_chunks
+            )
+
+        if cached_answer:
             trace.cache_hit        = True
             trace.avoided_cost_usd = ledger.rolling_avg_cost(tenant.tenant_id)
             ledger.record(trace)
             record_trace(trace)
-            return exact, trace
+            if workflow:
+                await workflow.close(session_id, tenant.tenant_id, cached_answer, [])
+            return cached_answer, trace
 
-    # ── ChromaDB L2 semantic cache + RAG ─────────────────────────────────────
-    cached_answer, rag_context = rag.retrieve(question)
-    doc_chunks = query_documents(question, tenant_id=tenant.tenant_id)
-    if doc_chunks:
-        rag_context += "\n\n" + "\n\n".join(
-            f"[Doc: {c['source']}]\n{c['chunk']}" for c in doc_chunks
+        # ── Long-term memory context (injected before planning) ───────────────
+        if ltm:
+            ltm_context = ltm.get_context_for_planner(tenant.tenant_id, user_id, question)
+            if ltm_context:
+                rag_context = ltm_context + ("\n\n" + rag_context if rag_context else "")
+
+        # ── Plan ─────────────────────────────────────────────────────────────
+        current_stage = "planning"
+        if workflow:
+            await workflow.set_state(session_id, tenant.tenant_id, PipelineState.PLANNING)
+
+        plan = await planner.create_plan(
+            client, question,
+            rag_context=rag_context,
+            conversation_history=history,
+            trace=trace,
+        )
+        trace.agents_invoked = plan["agents"]
+        tasks_map = plan.get("tasks", {})
+
+        # ── Parallel agents (semantic + benchmark) ────────────────────────────
+        current_stage = "agents_running"
+        if workflow:
+            await workflow.set_state(session_id, tenant.tenant_id, PipelineState.AGENTS_RUNNING)
+
+        sub_traces: dict[str, QueryTrace] = {}
+        coros: dict[str, asyncio.coroutines] = {}
+
+        # Replay: skip agents whose results were checkpointed in a prior session
+        parallel_results: dict[str, str] = dict(prefilled_results or {})
+
+        for name in ("semantic", "benchmark"):
+            if name in plan["agents"] and name not in parallel_results:
+                sub_traces[name] = QueryTrace(question=tasks_map.get(name, question))
+                agent_fn = semantic_agent if name == "semantic" else benchmark_agent
+                coros[name] = agent_fn.run(
+                    client, orchestrator, tasks_map.get(name, question), sub_traces[name]
+                )
+
+        if coros:
+            gathered = await asyncio.gather(*coros.values())
+            for name, result in zip(coros.keys(), gathered):
+                parallel_results[name] = result
+                trace.merge_agent_trace(name, sub_traces[name])
+                if workflow:
+                    sub = sub_traces[name]
+                    await workflow.checkpoint_agent(
+                        session_id, tenant.tenant_id, name, result,
+                        sub.input_tokens, sub.output_tokens,
+                    )
+
+        # ── Insight agent (sequential — uses parallel results as context) ─────
+        if "insight" in plan["agents"] and "insight" not in parallel_results:
+            context_blob = "\n\n".join(
+                f"[{k.upper()}]\n{v}" for k, v in parallel_results.items()
+            )
+            insight_sub = QueryTrace(question=tasks_map.get("insight", question))
+            insight_result = await insight_agent.run(
+                client, orchestrator, tasks_map.get("insight", question),
+                context=context_blob, trace=insight_sub,
+            )
+            if len(insight_result) < 120 or insight_result.startswith("[Agent error"):
+                broader = (
+                    f"Try a broader analysis for: {tasks_map.get('insight', question)}. "
+                    "Use wider date ranges or remove restrictive filters."
+                )
+                insight_result = await insight_agent.run(
+                    client, orchestrator, broader, context=context_blob, trace=insight_sub)
+            parallel_results["insight"] = insight_result
+            trace.merge_agent_trace("insight", insight_sub)
+            if workflow:
+                await workflow.checkpoint_agent(
+                    session_id, tenant.tenant_id, "insight", insight_result,
+                    insight_sub.input_tokens, insight_sub.output_tokens,
+                )
+
+        # ── Synthesis ─────────────────────────────────────────────────────────
+        current_stage = "synthesizing"
+        if workflow:
+            await workflow.set_state(session_id, tenant.tenant_id, PipelineState.SYNTHESIZING)
+
+        agent_summaries = "\n\n".join(
+            f"## {n.title()} Agent\n{r}" for n, r in parallel_results.items()
+        )
+        synthesis = (
+            f"User question: {question}\n\nAgent findings:\n{agent_summaries}\n\n"
+            "Synthesize into a clear, concise answer with key numbers. Use markdown."
         )
 
-    if cached_answer:
-        trace.cache_hit        = True
-        trace.avoided_cost_usd = ledger.rolling_avg_cost(tenant.tenant_id)
+        response = await client.messages.create(
+            model=MODEL, max_tokens=2048,
+            system=_SYNTHESIS_SYSTEM_BLOCK,
+            messages=[{"role": "user", "content": synthesis}],
+        )
+        trace.record_usage(response)
+        answer = response.content[0].text
+
+        if check_pii(answer).allowed:
+            rag.store_qa(question, answer, trace.agents_invoked)
+            if redis_mem:
+                await redis_mem.set_exact(tenant.tenant_id, question, answer, trace.agents_invoked)
+        if redis_mem:
+            await redis_mem.append_history(tenant.tenant_id, question, answer)
+        history.append({"question": question, "answer": answer})
+        rag.save_history(history)
+
+        # ── Long-term memory — store analysis and auto-reinforce patterns ─────
+        if ltm:
+            ltm.store_analysis(
+                tenant.tenant_id, question, answer[:500], trace.agents_invoked
+            )
+
         ledger.record(trace)
         record_trace(trace)
-        return cached_answer, trace
+        update_cache_size(trace.tenant_id, rag.stats()["qa_entries"])
 
-    # ── Plan ─────────────────────────────────────────────────────────────────
-    plan = await planner.create_plan(
-        client, question,
-        rag_context=rag_context,
-        conversation_history=history,
-        trace=trace,
-    )
-    trace.agents_invoked = plan["agents"]
-    tasks_map = plan.get("tasks", {})
+        if workflow:
+            await workflow.close(session_id, tenant.tenant_id, answer, trace.agents_invoked)
 
-    # ── Parallel agents (semantic + benchmark) ────────────────────────────────
-    sub_traces: dict[str, QueryTrace] = {}
-    coros: dict[str, asyncio.coroutines] = {}
-
-    for name in ("semantic", "benchmark"):
-        if name in plan["agents"]:
-            sub_traces[name] = QueryTrace(question=tasks_map.get(name, question))
-            agent_fn = semantic_agent if name == "semantic" else benchmark_agent
-            coros[name] = agent_fn.run(
-                client, orchestrator, tasks_map.get(name, question), sub_traces[name]
-            )
-
-    parallel_results: dict[str, str] = {}
-    if coros:
-        gathered = await asyncio.gather(*coros.values())
-        for name, result in zip(coros.keys(), gathered):
-            parallel_results[name] = result
-            trace.merge_agent_trace(name, sub_traces[name])
-
-    # ── Insight agent (sequential — uses parallel results as context) ─────────
-    if "insight" in plan["agents"]:
-        context_blob = "\n\n".join(
-            f"[{k.upper()}]\n{v}" for k, v in parallel_results.items()
+        log.info(
+            "query.complete",
+            session_id=session_id,
+            latency_s=round(trace.latency, 2),
+            cost_usd=round(trace.cost, 5),
+            cache_hit=trace.cache_hit,
+            agents=trace.agents_invoked,
         )
-        insight_sub = QueryTrace(question=tasks_map.get("insight", question))
-        insight_result = await insight_agent.run(
-            client, orchestrator, tasks_map.get("insight", question),
-            context=context_blob, trace=insight_sub,
-        )
-        if len(insight_result) < 120 or insight_result.startswith("[Agent error"):
-            broader = (
-                f"Try a broader analysis for: {tasks_map.get('insight', question)}. "
-                "Use wider date ranges or remove restrictive filters."
-            )
-            insight_result = await insight_agent.run(
-                client, orchestrator, broader, context=context_blob, trace=insight_sub)
-        parallel_results["insight"] = insight_result
-        trace.merge_agent_trace("insight", insight_sub)
+        return answer, trace
 
-    # ── Synthesis ─────────────────────────────────────────────────────────────
-    agent_summaries = "\n\n".join(
-        f"## {n.title()} Agent\n{r}" for n, r in parallel_results.items()
-    )
-    synthesis = (
-        f"User question: {question}\n\nAgent findings:\n{agent_summaries}\n\n"
-        "Synthesize into a clear, concise answer with key numbers. Use markdown."
-    )
-
-    response = await client.messages.create(
-        model=MODEL, max_tokens=2048,
-        system=_SYNTHESIS_SYSTEM_BLOCK,
-        messages=[{"role": "user", "content": synthesis}],
-    )
-    trace.record_usage(response)
-    answer = response.content[0].text
-
-    if check_pii(answer).allowed:
-        rag.store_qa(question, answer, trace.agents_invoked)
-        if redis_mem:
-            await redis_mem.set_exact(tenant.tenant_id, question, answer, trace.agents_invoked)
-    if redis_mem:
-        await redis_mem.append_history(tenant.tenant_id, question, answer)
-    history.append({"question": question, "answer": answer})
-    rag.save_history(history)
-    ledger.record(trace)
-    record_trace(trace)
-    update_cache_size(trace.tenant_id, rag.stats()["qa_entries"])
-
-    log.info(
-        "query.complete",
-        latency_s=round(trace.latency, 2),
-        cost_usd=round(trace.cost, 5),
-        cache_hit=trace.cache_hit,
-        agents=trace.agents_invoked,
-    )
-    return answer, trace
+    except Exception as exc:
+        if workflow:
+            await workflow.mark_failed(session_id, tenant.tenant_id, current_stage, str(exc))
+        raise
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
@@ -556,3 +628,158 @@ async def redis_invalidate(question: str, ctx: TenantContext = Depends(require_a
     if redis_mem:
         await redis_mem.invalidate_exact(ctx.tenant_id, question)
     return {"invalidated": question, "tenant_id": ctx.tenant_id}
+
+
+# ── Session / Workflow State endpoints ────────────────────────────────────────
+
+@app.get("/sessions")
+async def list_sessions(limit: int = 20, ctx: TenantContext = Depends(require_auth)):
+    """List the most recent pipeline sessions for the authenticated tenant (newest first)."""
+    workflow: WorkflowStateStore = _state.get("workflow")
+    if not workflow or not workflow.available:
+        return {"sessions": [], "status": "workflow_store_unavailable"}
+    sessions = await workflow.list_sessions(ctx.tenant_id, limit=limit)
+    return {"sessions": sessions, "tenant_id": ctx.tenant_id}
+
+
+@app.get("/sessions/{session_id}")
+async def get_session(session_id: str, ctx: TenantContext = Depends(require_auth)):
+    """Return the full workflow state and completed checkpoints for a session."""
+    workflow: WorkflowStateStore = _state.get("workflow")
+    if not workflow or not workflow.available:
+        raise HTTPException(status_code=503, detail="Workflow store unavailable.")
+    state = await workflow.get(session_id, ctx.tenant_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found.")
+    checkpoints = await workflow.get_checkpointed_results(session_id, ctx.tenant_id)
+    return {
+        "workflow":    state,
+        "checkpoints": {k: v[:300] + "…" for k, v in checkpoints.items()},
+    }
+
+
+@app.post("/sessions/{session_id}/replay")
+async def replay_session(
+    session_id: str,
+    ctx: TenantContext = Depends(require_auth),
+):
+    """
+    Replay a failed or incomplete session.
+
+    Loads checkpointed agent results from the original session and skips
+    re-running agents that already completed. Only synthesis (or missing agents)
+    are re-executed. Returns the same QueryResponse shape as POST /query.
+    """
+    workflow: WorkflowStateStore = _state.get("workflow")
+    if not workflow or not workflow.available:
+        raise HTTPException(status_code=503, detail="Workflow store unavailable.")
+
+    state = await workflow.get(session_id, ctx.tenant_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found.")
+
+    checkpoints = await workflow.get_checkpointed_results(session_id, ctx.tenant_id)
+    question    = state["question"]
+
+    answer, trace = await _run_pipeline(
+        ctx, question,
+        user_id=None,
+        prefilled_results=checkpoints,
+    )
+    return QueryResponse(
+        question=question,
+        answer=answer,
+        trace=trace.to_dict(),
+        cached=trace.cache_hit,
+    )
+
+
+# ── Long-Term Memory endpoints ────────────────────────────────────────────────
+
+@app.get("/memory/analyses")
+async def memory_analyses(limit: int = 20, ctx: TenantContext = Depends(require_auth)):
+    """List the most recent analyses stored in long-term memory for this tenant."""
+    ltm: LongTermMemory = _state.get("ltm")
+    if not ltm:
+        return {"analyses": [], "status": "ltm_unavailable"}
+    return {"analyses": ltm.list_analyses(ctx.tenant_id, limit=limit)}
+
+
+@app.get("/memory/patterns")
+async def memory_patterns(ctx: TenantContext = Depends(require_auth)):
+    """List all domain patterns accumulated for this tenant, ranked by evidence."""
+    ltm: LongTermMemory = _state.get("ltm")
+    if not ltm:
+        return {"patterns": [], "status": "ltm_unavailable"}
+    return {"patterns": ltm.get_all_patterns(ctx.tenant_id)}
+
+
+@app.post("/memory/patterns")
+async def add_pattern(
+    pattern: str,
+    evidence_count: int = 1,
+    ctx: TenantContext = Depends(require_auth),
+):
+    """Manually record or reinforce a domain pattern observation."""
+    ltm: LongTermMemory = _state.get("ltm")
+    if not ltm:
+        raise HTTPException(status_code=503, detail="Long-term memory unavailable.")
+    ltm.store_pattern(ctx.tenant_id, pattern, evidence_count)
+    return {"stored": pattern, "evidence_count": evidence_count}
+
+
+@app.delete("/memory/patterns")
+async def delete_pattern(pattern: str, ctx: TenantContext = Depends(require_auth)):
+    """Remove a domain pattern from long-term memory."""
+    ltm: LongTermMemory = _state.get("ltm")
+    if not ltm:
+        raise HTTPException(status_code=503, detail="Long-term memory unavailable.")
+    deleted = ltm.delete_pattern(ctx.tenant_id, pattern)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Pattern not found.")
+    return {"deleted": pattern}
+
+
+@app.get("/memory/preferences")
+async def get_preferences(
+    user_id: str,
+    ctx: TenantContext = Depends(require_auth),
+):
+    """Return all stored preferences for a specific user."""
+    ltm: LongTermMemory = _state.get("ltm")
+    if not ltm:
+        return {"preferences": {}}
+    return {"preferences": ltm.get_preferences(ctx.tenant_id, user_id), "user_id": user_id}
+
+
+class PreferenceRequest(BaseModel):
+    user_id: str
+    key:     str
+    value:   str
+
+
+@app.put("/memory/preferences")
+async def set_preference(
+    req: PreferenceRequest,
+    ctx: TenantContext = Depends(require_auth),
+):
+    """Upsert a user preference (e.g. answer_depth=detailed, preferred_region=APAC)."""
+    ltm: LongTermMemory = _state.get("ltm")
+    if not ltm:
+        raise HTTPException(status_code=503, detail="Long-term memory unavailable.")
+    ltm.store_preference(ctx.tenant_id, req.user_id, req.key, req.value)
+    return {"stored": {req.key: req.value}, "user_id": req.user_id}
+
+
+@app.delete("/memory/preferences")
+async def delete_preference(
+    user_id: str,
+    key: str,
+    ctx: TenantContext = Depends(require_auth),
+):
+    """Remove a specific user preference key."""
+    ltm: LongTermMemory = _state.get("ltm")
+    if not ltm:
+        raise HTTPException(status_code=503, detail="Long-term memory unavailable.")
+    ltm.delete_preference(ctx.tenant_id, user_id, key)
+    return {"deleted": key, "user_id": user_id}

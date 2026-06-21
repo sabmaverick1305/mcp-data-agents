@@ -95,6 +95,11 @@ class RedisMemory:
     def available(self) -> bool:
         return self._client is not None
 
+    @property
+    def client(self) -> aioredis.Redis | None:
+        """Expose the raw async Redis client for modules that share the connection (e.g. WorkflowStateStore)."""
+        return self._client
+
     # ── L1 exact cache ────────────────────────────────────────────────────────
 
     async def get_exact(self, tenant_id: str, question: str) -> Optional[str]:
